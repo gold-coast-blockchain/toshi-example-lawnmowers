@@ -6,8 +6,6 @@ const constants = require('./constants');
 
 let bot = new Bot()
 
-// ROUTING
-
 // Session STATES
 // 1 - Init
 // 2 - register start
