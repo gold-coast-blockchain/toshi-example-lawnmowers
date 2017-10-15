@@ -7,12 +7,11 @@ const constants = require('./constants');
 let bot = new Bot()
 
 // Session STATES
-// 1 - Init
-// 2 - register start
+// 1 - welcome
 // 3 - register price
 // 4 - register location
-// 5 - List lms
-// 6 - Select lm from list
+// 5 - selecting lawn mower to rent
+// 6 - selected lawn mower to rent
 // 7 - renting from someone
 // 8 - renting out
 
@@ -27,8 +26,8 @@ let bot = new Bot()
   * "PaymentRequest" - payment request from user
   */
 bot.onEvent = function(session, message) {
-    Logger.info("User: " + session.user.name); //JSON.stringify(session.user));
-    Logger.info("State: " + session.get("state")); //JSON.stringify(session.user));
+    Logger.info("User: " + session.user.name);
+    Logger.info("State: " + session.get("state"));
     Logger.info("onEvent - message = " + message.type);
     switch (message.type) {
         case 'Init':
@@ -57,7 +56,6 @@ function onCommand(session, command) {
     Logger.info("onCommand - message = " + command.content.value);
     switch (command.content.value) {
         case "register":
-            session.set("state", 2);
             registerLawnMower_getPrice(session)
             break
         case 'find':
@@ -65,7 +63,7 @@ function onCommand(session, command) {
             findLawnMower(session)
             break
         case "returned":
-            session.set("state", 9);
+            session.set("state", 1);
             returnLawnMower(session);
             break
     }
@@ -89,33 +87,13 @@ function onMessage(session, message) {
     checkIfIAmRentingOut(session);
     checkDeposit(session);
 
-    if (session.get("state") == 8) {
-        let controls = [
-          {type: 'button', label: "Lawn mower returned alright", value: "returned"}
-        ];
-        let msg = "You are currently renting out your lawn mower";
-        session.reply(SOFA.Message({
-            controls: controls,
-            body: msg,
-            showKeyboard: false,
-        }));
-    } else if (session.get("state") == 3) {
-        // check it is a number
-        Logger.info("message = " + message.body);
-        session.set("price", message.body);
-        registerLawnMower_getLocation(session);
-    } else if (session.get("state") == 4) {
-        // check it is a location
-        session.set("location", message.body);
-        registerLawnMower_insert(session);
-    } else if (session.get("state") == 5) {
-        // check if you are not already renting
-        // check if you put a number and there is a rental with that number
-        session.set("renting", message.body);
-        // fIXME
-        // session.set("state", 1);
-        selectedLawnMowerToRent(session);
-    } else if (session.get("state") == 1) {
+    if (session.get("state") == 3) { // state = register price
+        registerLawnMower_getLocation(session, message.body);
+    } else if (session.get("state") == 4) { // state = register location
+        registerLawnMower_insert(session, message.body);
+    } else if (session.get("state") == 5) { // state = selecting lawn mower to rent
+        selectedLawnMowerToRent(session, message.body);
+    } else if (session.get("state") == 1) { // state = welcome
         welcome(session);
     }
 }
@@ -131,8 +109,9 @@ function onPayment(session, message) {
 
         Logger.info("from address: " + message.fromAddress);
         Logger.info("from user: " + session.user.name);
-        Logger.info("value received: " + message.value); //fiat.AUD.fromEth(unit.fromWei(message.value, 'ether')) + " AUD");
+        Logger.info("value received: " + message.value);
 
+        // FIXME - gets called when returning deposit
         registerRental_insert(session);
     }
 }
@@ -145,7 +124,7 @@ function onPayment(session, message) {
   * when he receives the message.
   */
 function checkDeposit(session) {
-    Logger.info("getting deposit");
+    Logger.info("Check if deposit should be returned");
     bot.client.store.getKey('registrations').then((registrations) => {
         if (registrations != null) {
             let myUserId = session.user.token_id;
@@ -155,13 +134,15 @@ function checkDeposit(session) {
                     Logger.info("Found deposit to return");
                     session.set("state", 1);
 
-                    sendMessage(session, "Your deposit is being returned.");
-                    session.sendEth(Number(10 / 100), function(session, error, result) {
-                        console.log(error)
-                    });
-
                     registrations[i].status == 0; // AVAILABLE
                     bot.client.store.setKey('registrations', registrations);
+
+                    sendMessage(session, "Your deposit is being returned.");
+                    Fiat.fetch().then((toEth) => {
+                        session.sendEth(toEth.AUD(Number(10 / 100)), function(session, error, result) {
+                            console.log(error)
+                        });
+                    })
                 }
             }
         }
@@ -186,21 +167,23 @@ function returnLawnMower(session) {
             for (var i = 0; i < registrations.length; i++) {
                 Logger.info("checking registrations: " + JSON.stringify(registrations[i]));
                 if ((myUserId == registrations[i].userId) && (registrations[i].status == 1)) {
-                    session.set("state", 1);
+                    registrations[i].status = 2; // RETURNING DEPOSIT
+                    bot.client.store.setKey('registrations', registrations);
 
                     sendMessage(session, "Thank you! Deposit will be returned to renter. And you will receive your payment.");
-
-                    session.sendEth(Number(registrations[i].price / 100), function(session, error, result) {
-                        console.log(error)
-                    });
 
                     let userMsg = "Thank you! Lawn mower returned alright. Deposit is being returned to your account.";
                     bot.client.send(registrations[i].renter, userMsg)
 
-                    registrations[i].status == 2; // RETURNING DEPOSIT
-                    bot.client.store.setKey('registrations', registrations);
-
                     session.set("state", 1); // state = RENTING OUT
+
+                    let LMProFee = 1;
+                    let returnEth = Number(Number(registrations[i].price - LMProFee)  / 100);
+                    Fiat.fetch().then((toEth) => {
+                        session.sendEth(toEth.AUD(returnEth), function(session, error, result) {
+                            console.log(error)
+                        });
+                    })
                 }
             }
         }
@@ -245,13 +228,15 @@ function checkIfIAmRentingOut(session) {
             for (var i = 0; i < registrations.length; i++) {
                 Logger.info("checking registrations: " + JSON.stringify(registrations[i]));
                 if ((myUserId == registrations[i].userId) && (registrations[i].status == 1)) {
-                    // let controls = [
-                    //   {type: 'button', label: "Lawn mower returned alright", value: "returned"}
-                    // ];
-                    // session.reply(SOFA.Message({
-                    //   controls: controls,
-                    //   showKeyboard: false,
-                    // }));
+                    let controls = [
+                      {type: 'button', label: "Lawn mower returned alright", value: "returned"}
+                    ];
+                    let msg = "You are currently renting out your lawn mower";
+                    session.reply(SOFA.Message({
+                        controls: controls,
+                        body: msg,
+                        showKeyboard: false,
+                    }));
 
                     session.set("state", 8); // state = RENTING OUT
                 }
@@ -331,7 +316,10 @@ function findLawnMower(session) {
   * Renter has selected a lawn mower from the list, so
   * request money (rental and deposit) from him.
   */
-function selectedLawnMowerToRent(session) {
+function selectedLawnMowerToRent(session, selectedlawnmower) {
+    // TODO - check if you are not already renting
+    // TODO - check if you put a number and there is a rental with that number
+    session.set("renting", selectedlawnmower);
     session.set("state", 6);
 
     bot.client.store.getKey('registrations').then((registrations) => {
@@ -372,7 +360,10 @@ function registerLawnMower_getPrice(session) {
 /**
   * Registering a lawn mower to rent out. Get location.
   */
-function registerLawnMower_getLocation(session) {
+function registerLawnMower_getLocation(session, price) {
+    // TODO - check price is a valid number
+    session.set("price", price);
+
     session.set("state", 4);
 
     sendMessageShowKeyboard(session, "Please enter your location (e.g. 25 Bryans Road, Nerang)");
@@ -381,12 +372,12 @@ function registerLawnMower_getLocation(session) {
 /**
   * Insert a new registered lawn mower.
   */
-function registerLawnMower_insert(session) {
-    // get registrations
+function registerLawnMower_insert(session, location) {
+    // TODO - check valid location
     bot.client.store.getKey('registrations').then((registrations) => {
         let name = session.user.name;
         let userId = session.user.token_id;
-        var registration = {user: name, userId: userId, renter: 0, price: session.get("price"), location: session.get("location"), status: 0};
+        var registration = {user: name, userId: userId, renter: 0, price: session.get("price"), location: location, status: 0};
         if ((registrations == null) || (registrations == undefined)) {
             registrations = new Array();
         }
